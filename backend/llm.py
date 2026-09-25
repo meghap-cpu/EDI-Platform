@@ -5,8 +5,9 @@ Settings come from environment variables:
   OPENROUTER_API_KEY, OPENROUTER_MODEL  (default model: meta-llama/llama-3.3-70b-instruct:free)
   OLLAMA_HOST, OLLAMA_MODEL             (defaults: http://localhost:11434, qwen3-vl:4b)
   OLLAMA_NUM_CTX                        (default: 16384; Ollama silently cuts longer input)
-  OLLAMA_TEMPERATURE                    (default: 0.2; low keeps values copied faithfully
-                                         and answers repeatable)
+  OLLAMA_TEMPERATURE                    (default: not set, so the model's own recommended value is
+                                         used; thinking models such as qwen3-vl slow down badly
+                                         at low values like 0.2)
 Model names change often; override them if a default no longer exists.
 
 Gemini and Ollama are sent page images (a text-only Ollama model ignores them).
@@ -104,15 +105,19 @@ def _ollama(prompt, image_png, timeout=None):
             "model": model,
             "messages": [message],
             "stream": False,
-            "options": {
-                "num_ctx": int(os.environ.get("OLLAMA_NUM_CTX", "16384")),
-                "temperature": float(os.environ.get("OLLAMA_TEMPERATURE", "0.2")),
-            },
+            "options": _ollama_options(),
         },
         timeout=timeout or TIMEOUT_SECONDS * 3,  # local model on a laptop GPU is slower
     )
     _raise_for_status(response)
     return response.json()["message"]["content"]
+
+
+def _ollama_options():
+    options = {"num_ctx": int(os.environ.get("OLLAMA_NUM_CTX", "16384"))}
+    if os.environ.get("OLLAMA_TEMPERATURE"):  # unset: keep the model's own recommended temperature
+        options["temperature"] = float(os.environ["OLLAMA_TEMPERATURE"])
+    return options
 
 
 def _raise_for_status(response):

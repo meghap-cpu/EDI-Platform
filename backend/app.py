@@ -30,16 +30,15 @@ class Question(BaseModel):
 
 @app.get("/api/agents")
 def list_agents():
-    return agent.list_agents()
+    return [{**info, "running": info["id"] in _building} for info in agent.list_agents()]
 
 
 @app.post("/api/agents")
-async def create_agent(binder: UploadFile = File(...), rulebooks: list[UploadFile] = File(...)):
+async def create_agent(binder: UploadFile = File(...), rulebooks: list[UploadFile] = File(default=[])):
     if not binder.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "The binder must be a PDF file.")
+    # Rulebooks are optional; non-PDF files among them are ignored.
     rulebook_files = [(f.filename, await f.read()) for f in rulebooks if f.filename.lower().endswith(".pdf")]
-    if not rulebook_files:
-        raise HTTPException(400, "Add at least one rulebook PDF.")
     agent_id = agent.create_agent(binder.filename, await binder.read(), rulebook_files)
     _start_build(agent_id)
     return agent.get_info(agent_id)
@@ -65,7 +64,7 @@ def resume_agent(agent_id: str):
 def ask(agent_id: str, body: Question):
     _require(agent_id)
     if agent.get_info(agent_id).get("status") != "ready":
-        raise HTTPException(409, "This agent is not ready yet.")
+        raise HTTPException(409, "This binder is still being read. Ask again once it shows Ready.")
     try:
         return agent.answer(agent_id, body.question, [(m.role, m.text) for m in body.history])
     except llm.LLMError as error:
@@ -73,11 +72,24 @@ def ask(agent_id: str, body: Question):
         raise HTTPException(503, "No AI service answered just now. Please try again in a minute.")
 
 
-@app.get("/api/agents/{agent_id}/page")
-def page(agent_id: str, source: str, file: str, page: int):
+@app.get("/api/agents/{agent_id}/equipment")
+def equipment(agent_id: str):
     _require(agent_id)
+    return agent.list_equipment(agent_id)
+
+
+@app.get("/api/agents/{agent_id}/sheets")
+def sheets(agent_id: str):
+    _require(agent_id)
+    return agent.list_sheets(agent_id)
+
+
+@app.get("/api/agents/{agent_id}/page")
+def page(agent_id: str, source: str, file: str, page: int, dpi: int = 150):
+    _require(agent_id)
+    dpi = min(max(dpi, 20), 200)  # small thumbnails up to the full-size view
     try:
-        return Response(agent.page_image(agent_id, source, file, page), media_type="image/png")
+        return Response(agent.page_image(agent_id, source, file, page, dpi), media_type="image/png")
     except (IndexError, FileNotFoundError, ValueError):
         raise HTTPException(404, "Page not found.")
 
@@ -99,4 +111,4 @@ def _start_build(agent_id):
 
 def _require(agent_id):
     if not agent.agent_exists(agent_id):
-        raise HTTPException(404, "No agent with that id.")
+        raise HTTPException(404, "No binder with that id.")

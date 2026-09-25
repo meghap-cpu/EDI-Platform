@@ -2,7 +2,7 @@
 
 Each agent lives in its own folder:
   agents/<agent_id>/input/binder.pdf
-  agents/<agent_id>/input/rulebooks/<file>.pdf
+  agents/<agent_id>/input/rulebooks/<file>.pdf   (optional)
   agents/<agent_id>/agent.db   (info, documents, equipment, search index)
 """
 
@@ -51,7 +51,7 @@ Raw text of the sheet:
 CITATION_RE = re.compile(r"\bbinder\s+p\.\s*(\d+)|\brulebook\s+([\w.-]+?)(?:\.pdf)?\s+p\.\s*(\d+)",
                          re.IGNORECASE)
 
-ANSWER_PROMPT = """You answer questions about an engineering binder (P&ID drawings) and its rulebooks.
+ANSWER_PROMPT = """You answer questions about an engineering binder (P&ID drawings) and any rulebooks uploaded with it.
 Use ONLY the information below. Cite pages like (binder p. 12) or (rulebook <file> p. 1),
 one page per citation. If the information below does not contain the answer, say you could not find it.
 Write plain text: use "- " for list items and **bold** for emphasis. Do not use headings or tables.
@@ -73,7 +73,7 @@ Question: {question}"""
 def create_agent(binder_name, binder_bytes, rulebooks):
     """Save the uploads in a new agent folder and return the agent id.
 
-    rulebooks: list of (file_name, bytes).
+    rulebooks: list of (file_name, bytes); may be empty.
     """
     stem = re.sub(r"[^a-z0-9]+", "-", Path(binder_name).stem.lower()).strip("-") or "binder"
     agent_id = f"{stem}-{datetime.now():%Y%m%d-%H%M%S}"
@@ -177,6 +177,8 @@ def answer(agent_id, question, history=()):
     history: earlier chat messages as (role, text) pairs, role 'user' or 'agent', oldest first.
     """
     history = list(history)[-MAX_HISTORY_MESSAGES:]
+    # A follow-up like "and its design temperature?" names nothing to search for,
+    # so search with the previous question's words as well.
     previous = [text for role, text in history if role == "user"][-1:]
     with _connect(agent_id) as db:
         matches = search.search(db, " ".join(previous + [question]))
@@ -231,7 +233,31 @@ def get_info(agent_id):
     with _connect(agent_id) as db:
         info = dict(db.execute("SELECT key, value FROM info"))
     info["id"] = agent_id
+    info["rulebooks"] = len(list((AGENTS_DIR / agent_id / "input" / "rulebooks").glob("*.pdf")))
     return info
+
+
+def list_equipment(agent_id):
+    """The equipment register: [{'tag', 'category', 'name', 'pages': [binder page numbers]}]."""
+    with _connect(agent_id) as db:
+        rows = db.execute("SELECT tag, category, name, pages FROM equipment ORDER BY tag").fetchall()
+    return [{"tag": tag, "category": category, "name": name, "pages": _page_numbers(pages)}
+            for tag, category, name, pages in rows]
+
+
+def list_sheets(agent_id):
+    """Every binder and rulebook page, with the equipment titled on each binder page."""
+    folder = AGENTS_DIR / agent_id / "input"
+    tags_by_page = {}
+    for item in list_equipment(agent_id):
+        for page_no in item["pages"]:
+            tags_by_page.setdefault(page_no, []).append(item["tag"])
+    sheets = [{"source": "binder", "file": "binder.pdf", "page": n, "equipment": tags_by_page.get(n, [])}
+              for n in range(1, _page_count(folder / "binder.pdf") + 1)]
+    for path in sorted((folder / "rulebooks").glob("*.pdf")):
+        sheets += [{"source": "rulebook", "file": path.name, "page": n, "equipment": []}
+                   for n in range(1, _page_count(path) + 1)]
+    return sheets
 
 
 def page_image(agent_id, source, file_name, page_no, dpi=150):
@@ -257,6 +283,11 @@ def _connect(agent_id):
             yield db
     finally:
         db.close()
+
+
+def _page_numbers(pages):
+    """'2,3' -> [2, 3]."""
+    return [int(n) for n in pages.split(",") if n]
 
 
 def _page_count(path):

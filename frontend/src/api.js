@@ -26,6 +26,10 @@ export const getAgent = (id) => request(`/agents/${id}`);
 
 export const resumeAgent = (id) => request(`/agents/${id}/resume`, { method: "POST" });
 
+export const getEquipment = (id) => request(`/agents/${id}/equipment`);
+
+export const getSheets = (id) => request(`/agents/${id}/sheets`);
+
 export function createAgent(binder, rulebooks) {
   const form = new FormData();
   form.append("binder", binder);
@@ -41,5 +45,7 @@ export const askAgent = (id, question, history = []) =>
     body: JSON.stringify({ question, history }),
   });
 
-export const pageImageUrl = (id, source) =>
-  `/api/agents/${id}/page?source=${source.source}&file=${encodeURIComponent(source.file)}&page=${source.page}`;
+// dpi: image resolution; small values give thumbnails. Leave it out for the full-size view.
+export const pageImageUrl = (id, source, dpi) =>
+  `/api/agents/${id}/page?source=${source.source}&file=${encodeURIComponent(source.file)}&page=${source.page}` +
+  (dpi ? `&dpi=${dpi}` : "");
