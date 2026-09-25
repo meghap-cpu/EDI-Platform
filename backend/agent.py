@@ -177,8 +177,6 @@ def answer(agent_id, question, history=()):
     history: earlier chat messages as (role, text) pairs, role 'user' or 'agent', oldest first.
     """
     history = list(history)[-MAX_HISTORY_MESSAGES:]
-    # A follow-up like "and its design temperature?" names nothing to search for,
-    # so search with the previous question's words as well.
     previous = [text for role, text in history if role == "user"][-1:]
     with _connect(agent_id) as db:
         matches = search.search(db, " ".join(previous + [question]))
