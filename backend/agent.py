@@ -27,8 +27,9 @@ PAGE_IMAGE_DPI = 100
 MAX_PAGE_TEXT = 12000     # characters of page text sent to the LLM
 MAX_CONTEXT_DOC = 3000    # characters per document when answering
 ANSWER_RETRY_WAITS = (3,) # a person is waiting: retry a busy provider once, then move on
-MAX_HISTORY_MESSAGES = 6  # earlier chat messages sent with a question (3 questions + answers)
-MAX_HISTORY_TEXT = 1500   # characters per earlier message
+ANSWER_TIMEOUT_SECONDS = 150  # usually under 30 s, but the model thinks longer on big prompts
+MAX_HISTORY_MESSAGES = 4  # earlier chat messages sent with a question (2 questions + answers)
+MAX_HISTORY_TEXT = 800    # characters per earlier message; enough for follow-ups
 
 SUMMARY_PROMPT = """You are reading one sheet of an engineering document ({kind}): {label}.
 You get the sheet's raw text (unordered labels) and, if available, an image of the sheet.
@@ -46,9 +47,14 @@ Use tags exactly as written in the text. Do not guess; leave out anything you ca
 Raw text of the sheet:
 {text}"""
 
+# A page citation as the answer prompt asks for it: "binder p. 12" or "rulebook <file> p. 1".
+CITATION_RE = re.compile(r"\bbinder\s+p\.\s*(\d+)|\brulebook\s+([\w.-]+?)(?:\.pdf)?\s+p\.\s*(\d+)",
+                         re.IGNORECASE)
+
 ANSWER_PROMPT = """You answer questions about an engineering binder (P&ID drawings) and its rulebooks.
-Use ONLY the information below. Cite pages like (binder p. 12) or (rulebook <file> p. 1).
-If the information below does not contain the answer, say you could not find it.
+Use ONLY the information below. Cite pages like (binder p. 12) or (rulebook <file> p. 1),
+one page per citation. If the information below does not contain the answer, say you could not find it.
+Write plain text: use "- " for list items and **bold** for emphasis. Do not use headings or tables.
 
 Equipment list extracted from the binder's machine-readable pages (use it for counts and lists):
 {equipment}
@@ -190,8 +196,10 @@ def answer(agent_id, question, history=()):
             "(scanned, or text drawn as lines). Equipment shown only on those pages may be missing, "
             "so say this whenever you give a count or a complete list.")
     documents_text = "\n\n".join(
-        # an LLM summary is sent whole; a page without one sends the passage that matched
-        f"[{_source_label(source, file, page)}]\n{summary[:MAX_CONTEXT_DOC] if summary else passage}"
+        # The summary is cut to MAX_CONTEXT_DOC characters, so the passage that matched the
+        # question is added too: it may lie beyond the cut. A page without a summary sends the passage.
+        f"[{_source_label(source, file, page)}]\n"
+        + (f"{summary[:MAX_CONTEXT_DOC]}\nPassage matching the question: {passage}" if summary else passage)
         for _, source, file, page, summary, passage in docs) or "(no matching pages)"
 
     history_text = "\n".join(
@@ -200,10 +208,16 @@ def answer(agent_id, question, history=()):
 
     prompt = ANSWER_PROMPT.format(equipment=equipment_text, documents=documents_text,
                                   history=history_text, question=question)
-    text, provider = llm.ask(prompt, retry_waits=ANSWER_RETRY_WAITS)
-    sources = [{"source": source, "file": file, "page": page}
-               for _, source, file, page, _, _ in docs]
-    return {"answer": text, "provider": provider, "sources": sources}
+    text, provider = llm.ask(prompt, retry_waits=ANSWER_RETRY_WAITS, timeout=ANSWER_TIMEOUT_SECONDS)
+
+    # Show the pages the answer cites; if it cites none, show the pages that were searched.
+    with _connect(agent_id) as db:
+        pages = _cited_pages(db, text)
+    cited = bool(pages)
+    if not cited:
+        pages = [(source, file, page) for _, source, file, page, _, _ in docs]
+    sources = [{"source": source, "file": file, "page": page} for source, file, page in pages]
+    return {"answer": text, "provider": provider, "sources": sources, "cited": cited}
 
 
 # ---------- reading agent data ----------
@@ -222,7 +236,7 @@ def get_info(agent_id):
     return info
 
 
-def page_image(agent_id, source, file_name, page_no, dpi=110):
+def page_image(agent_id, source, file_name, page_no, dpi=150):
     """PNG of one page, for showing the source of an answer."""
     folder = AGENTS_DIR / agent_id / "input"
     path = folder / "binder.pdf" if source == "binder" else folder / "rulebooks" / Path(file_name).name
@@ -255,6 +269,20 @@ def _page_count(path):
 def _set_info(db, **values):
     db.executemany("INSERT OR REPLACE INTO info VALUES (?, ?)",
                    [(k, str(v)) for k, v in values.items()])
+
+
+def _cited_pages(db, text):
+    """Pages cited in an answer that exist in this agent, as (source, file, page), in order."""
+    known = {(source, Path(file).stem.lower(), page): (source, file, page)
+             for source, file, page in db.execute("SELECT source, file, page FROM documents")}
+    pages = []
+    for match in CITATION_RE.finditer(text):
+        binder_page, rulebook, rulebook_page = match.groups()
+        key = (("binder", "binder", int(binder_page)) if binder_page
+               else ("rulebook", rulebook.lower(), int(rulebook_page)))
+        if key in known and known[key] not in pages:
+            pages.append(known[key])
+    return pages
 
 
 def _source_label(source, file, page):

@@ -5,6 +5,8 @@ Settings come from environment variables:
   OPENROUTER_API_KEY, OPENROUTER_MODEL  (default model: meta-llama/llama-3.3-70b-instruct:free)
   OLLAMA_HOST, OLLAMA_MODEL             (defaults: http://localhost:11434, qwen3-vl:4b)
   OLLAMA_NUM_CTX                        (default: 16384; Ollama silently cuts longer input)
+  OLLAMA_TEMPERATURE                    (default: 0.2; low keeps values copied faithfully
+                                         and answers repeatable)
 Model names change often; override them if a default no longer exists.
 
 Gemini and Ollama are sent page images (a text-only Ollama model ignores them).
@@ -28,34 +30,35 @@ class LLMError(Exception):
         self.status = status
 
 
-def ask(prompt, image_png=None, retry_waits=RETRY_WAITS):
+def ask(prompt, image_png=None, retry_waits=RETRY_WAITS, timeout=None):
     """Return (answer_text, provider_name). Raises LLMError if every provider fails.
 
     retry_waits: seconds to wait before each retry of a busy provider. Use short
     waits when a person is waiting for the answer.
+    timeout: seconds to wait for each reply; None uses each provider's default.
     """
     errors = []
     for name, call in (("Gemini", _gemini), ("OpenRouter", _openrouter), ("Ollama", _ollama)):
         try:
-            return _with_retries(call, prompt, image_png, retry_waits), name
+            return _with_retries(call, prompt, image_png, retry_waits, timeout), name
         except Exception as error:  # any failure: missing key, rate limit, network, bad reply
             errors.append(f"{name}: {error}")
     raise LLMError("All providers failed. " + " | ".join(errors))
 
 
-def _with_retries(call, prompt, image_png, retry_waits):
+def _with_retries(call, prompt, image_png, retry_waits, timeout):
     """Call a provider; if it is busy or rate limited, wait and try again a few times."""
     for wait in retry_waits:
         try:
-            return call(prompt, image_png)
+            return call(prompt, image_png, timeout)
         except LLMError as error:
             if error.status not in RETRYABLE_STATUS:
                 raise
             time.sleep(wait)
-    return call(prompt, image_png)  # last attempt; its error goes to the caller
+    return call(prompt, image_png, timeout)  # last attempt; its error goes to the caller
 
 
-def _gemini(prompt, image_png):
+def _gemini(prompt, image_png, timeout=None):
     key = os.environ.get("GEMINI_API_KEY")
     if not key:
         raise LLMError("GEMINI_API_KEY is not set")
@@ -68,13 +71,13 @@ def _gemini(prompt, image_png):
         f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
         headers={"x-goog-api-key": key},
         json={"contents": [{"parts": parts}]},
-        timeout=TIMEOUT_SECONDS,
+        timeout=timeout or TIMEOUT_SECONDS,
     )
     _raise_for_status(response)
     return response.json()["candidates"][0]["content"]["parts"][0]["text"]
 
 
-def _openrouter(prompt, _image_png):
+def _openrouter(prompt, _image_png, timeout=None):
     key = os.environ.get("OPENROUTER_API_KEY")
     if not key:
         raise LLMError("OPENROUTER_API_KEY is not set")
@@ -83,13 +86,13 @@ def _openrouter(prompt, _image_png):
         "https://openrouter.ai/api/v1/chat/completions",
         headers={"Authorization": f"Bearer {key}"},
         json={"model": model, "messages": [{"role": "user", "content": prompt}]},
-        timeout=TIMEOUT_SECONDS,
+        timeout=timeout or TIMEOUT_SECONDS,
     )
     _raise_for_status(response)
     return response.json()["choices"][0]["message"]["content"]
 
 
-def _ollama(prompt, image_png):
+def _ollama(prompt, image_png, timeout=None):
     host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
     model = os.environ.get("OLLAMA_MODEL", "qwen3-vl:4b")
     message = {"role": "user", "content": prompt}
@@ -101,9 +104,12 @@ def _ollama(prompt, image_png):
             "model": model,
             "messages": [message],
             "stream": False,
-            "options": {"num_ctx": int(os.environ.get("OLLAMA_NUM_CTX", "16384"))},
+            "options": {
+                "num_ctx": int(os.environ.get("OLLAMA_NUM_CTX", "16384")),
+                "temperature": float(os.environ.get("OLLAMA_TEMPERATURE", "0.2")),
+            },
         },
-        timeout=TIMEOUT_SECONDS * 3,  # local model on a laptop GPU is slower
+        timeout=timeout or TIMEOUT_SECONDS * 3,  # local model on a laptop GPU is slower
     )
     _raise_for_status(response)
     return response.json()["message"]["content"]
