@@ -4,7 +4,7 @@ flowchart TD
     end
 
     subgraph READ["Step 2: System reads the documents"]
-        B --> C["Builds the equipment list<br/>(pumps, vessels, tanks, etc.)<br/>directly from the drawings"]
+        B --> C["Builds the equipment list<br/>(pumps, vessels, tanks, etc.)<br/>and notes any pages<br/>it could not read"]
         C --> D["AI reads every page<br/>and writes a short summary"]
         D --> E{"Was the AI<br/>available?"}
         E -->|"Yes"| F["Summary saved"]
@@ -19,9 +19,11 @@ flowchart TD
     R -.-> D
 
     subgraph ASK["Step 3: Ask questions"]
-        I --> J["User asks a question<br/>e.g. 'How many pumps are there?'"]
-        J --> K["System finds the pages<br/>that match the question"]
-        K --> L["AI writes an answer using<br/>only those pages and<br/>the equipment list"]
-        L --> M["User sees the answer<br/>with page references"]
-        M --> N["User can click a reference<br/>to view the original drawing"]
+        I --> J["User asks a question<br/>e.g. 'How many pumps are there?'<br/>or a follow-up like<br/>'What is its design pressure?'"]
+        J --> K["System finds the matching pages,<br/>using the recent conversation<br/>to understand follow-ups"]
+        K --> L["AI writes an answer using<br/>only those pages and<br/>the equipment list,<br/>noting any unreadable pages"]
+        L --> M{"AI service<br/>answered?"}
+        M -->|"Yes"| N["User sees the answer<br/>with page references"]
+        M -->|"No, within seconds"| X["User sees:<br/>'Please try again in a minute'"]
+        N --> O["User can click a reference<br/>to view the original drawing"]
     end

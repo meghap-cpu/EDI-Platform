@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { askAgent, createAgent, getAgent, listAgents, pageImageUrl, resumeAgent } from "./api.js";
 
+const HISTORY_MESSAGES = 6; // earlier messages sent with each question, so follow-ups make sense
+
 const EXAMPLE_QUESTIONS = [
   "How many pumps are there?",
   "What is the design pressure of 0751-V-101?",
@@ -234,11 +236,15 @@ function Chat({ agentId, ready, messages, addMessage, onViewSource }) {
   const ask = async (text) => {
     const q = text.trim();
     if (!q || busy) return;
+    const history = messages
+      .filter((m) => !m.error)
+      .slice(-HISTORY_MESSAGES)
+      .map((m) => ({ role: m.role, text: m.text }));
     addMessage({ role: "user", text: q });
     setQuestion("");
     setBusy(true);
     try {
-      const reply = await askAgent(agentId, q);
+      const reply = await askAgent(agentId, q, history);
       addMessage({ role: "agent", text: reply.answer, provider: reply.provider, sources: reply.sources });
     } catch (e) {
       addMessage({ role: "agent", error: true, text: e.message });

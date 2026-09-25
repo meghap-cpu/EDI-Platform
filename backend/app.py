@@ -4,6 +4,7 @@ Run:  uvicorn app:app --port 8000
 """
 
 import threading
+from typing import Literal
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import Response
@@ -17,8 +18,14 @@ _building = set()  # agent ids with a build running in this process
 _lock = threading.Lock()
 
 
+class Message(BaseModel):
+    role: Literal["user", "agent"]
+    text: str
+
+
 class Question(BaseModel):
     question: str
+    history: list[Message] = []  # earlier messages in this chat, oldest first
 
 
 @app.get("/api/agents")
@@ -60,9 +67,10 @@ def ask(agent_id: str, body: Question):
     if agent.get_info(agent_id).get("status") != "ready":
         raise HTTPException(409, "This agent is not ready yet.")
     try:
-        return agent.answer(agent_id, body.question)
+        return agent.answer(agent_id, body.question, [(m.role, m.text) for m in body.history])
     except llm.LLMError as error:
-        raise HTTPException(503, str(error))
+        print(f"Answer failed for agent {agent_id}: {error}")  # full detail for the server log
+        raise HTTPException(503, "No AI service answered just now. Please try again in a minute.")
 
 
 @app.get("/api/agents/{agent_id}/page")

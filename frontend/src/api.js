@@ -28,11 +28,12 @@ export function createAgent(binder, rulebooks) {
   return request("/agents", { method: "POST", body: form });
 }
 
-export const askAgent = (id, question) =>
+// history: earlier messages in this chat as [{ role: "user" | "agent", text }], oldest first.
+export const askAgent = (id, question, history = []) =>
   request(`/agents/${id}/ask`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question }),
+    body: JSON.stringify({ question, history }),
   });
 
 export const pageImageUrl = (id, source) =>

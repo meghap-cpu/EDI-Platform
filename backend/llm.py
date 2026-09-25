@@ -28,20 +28,24 @@ class LLMError(Exception):
         self.status = status
 
 
-def ask(prompt, image_png=None):
-    """Return (answer_text, provider_name). Raises LLMError if every provider fails."""
+def ask(prompt, image_png=None, retry_waits=RETRY_WAITS):
+    """Return (answer_text, provider_name). Raises LLMError if every provider fails.
+
+    retry_waits: seconds to wait before each retry of a busy provider. Use short
+    waits when a person is waiting for the answer.
+    """
     errors = []
     for name, call in (("Gemini", _gemini), ("OpenRouter", _openrouter), ("Ollama", _ollama)):
         try:
-            return _with_retries(call, prompt, image_png), name
+            return _with_retries(call, prompt, image_png, retry_waits), name
         except Exception as error:  # any failure: missing key, rate limit, network, bad reply
             errors.append(f"{name}: {error}")
     raise LLMError("All providers failed. " + " | ".join(errors))
 
 
-def _with_retries(call, prompt, image_png):
+def _with_retries(call, prompt, image_png, retry_waits):
     """Call a provider; if it is busy or rate limited, wait and try again a few times."""
-    for wait in RETRY_WAITS:
+    for wait in retry_waits:
         try:
             return call(prompt, image_png)
         except LLMError as error:

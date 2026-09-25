@@ -26,6 +26,9 @@ PAUSE_SECONDS = float(os.environ.get("PAUSE_SECONDS", "4"))  # between LLM calls
 PAGE_IMAGE_DPI = 100
 MAX_PAGE_TEXT = 12000     # characters of page text sent to the LLM
 MAX_CONTEXT_DOC = 3000    # characters per document when answering
+ANSWER_RETRY_WAITS = (3,) # a person is waiting: retry a busy provider once, then move on
+MAX_HISTORY_MESSAGES = 6  # earlier chat messages sent with a question (3 questions + answers)
+MAX_HISTORY_TEXT = 1500   # characters per earlier message
 
 SUMMARY_PROMPT = """You are reading one sheet of an engineering document ({kind}): {label}.
 You get the sheet's raw text (unordered labels) and, if available, an image of the sheet.
@@ -47,11 +50,14 @@ ANSWER_PROMPT = """You answer questions about an engineering binder (P&ID drawin
 Use ONLY the information below. Cite pages like (binder p. 12) or (rulebook <file> p. 1).
 If the information below does not contain the answer, say you could not find it.
 
-Equipment list extracted from the binder (exact; use it for counts and lists):
+Equipment list extracted from the binder's machine-readable pages (use it for counts and lists):
 {equipment}
 
 Relevant pages:
 {documents}
+
+Earlier conversation (use it only to understand what the question refers to):
+{history}
 
 Question: {question}"""
 
@@ -94,13 +100,17 @@ def build_agent(agent_id):
         with _connect(agent_id) as db:
             _set_info(db, status="processing", error="")
 
-        # 1. Equipment list (fast, exact, no LLM)
-        with _connect(agent_id) as db:
-            if not db.execute("SELECT 1 FROM equipment LIMIT 1").fetchone():
-                _, assets = build_register(str(binder))
+        # 1. Equipment list (fast, exact, no LLM), and the binder pages it could not read.
+        #    Agents built before 'unread_pages' existed get it on their next resume.
+        if "unread_pages" not in get_info(agent_id):
+            page_types, assets = build_register(str(binder))
+            unread = [n for n, t in sorted(page_types.items()) if t != "text"]
+            with _connect(agent_id) as db:
+                db.execute("DELETE FROM equipment")
                 db.executemany("INSERT INTO equipment VALUES (?, ?, ?, ?)", [
                     (tag, a["category"], a["name"], ",".join(map(str, sorted(a["pages"]))))
                     for tag, a in assets.items()])
+                _set_info(db, unread_pages=",".join(map(str, unread)))
 
         # 2. Every rulebook page and binder page, summarised by the LLM
         sheets = [("rulebook", path) for path in rulebooks] + [("binder", binder)]
@@ -155,25 +165,42 @@ def _read_page(agent_id, source, file_name, page):
 
 # ---------- questions ----------
 
-def answer(agent_id, question):
-    """Return {'answer', 'provider', 'sources'} for a question."""
+def answer(agent_id, question, history=()):
+    """Return {'answer', 'provider', 'sources'} for a question.
+
+    history: earlier chat messages as (role, text) pairs, role 'user' or 'agent', oldest first.
+    """
+    history = list(history)[-MAX_HISTORY_MESSAGES:]
+    # A follow-up like "and its design temperature?" names nothing to search for,
+    # so search with the previous question's words as well.
+    previous = [text for role, text in history if role == "user"][-1:]
     with _connect(agent_id) as db:
-        matches = search.search(db, question)
+        matches = search.search(db, " ".join(previous + [question]))
         docs = [db.execute("SELECT id, source, file, page, summary FROM documents WHERE id=?",
                            (doc_id,)).fetchone() + (passage,) for doc_id, passage in matches]
         equipment = db.execute("SELECT tag, category, name, pages FROM equipment ORDER BY tag").fetchall()
+    unread = get_info(agent_id).get("unread_pages", "")
 
     counts = Counter(row[1] for row in equipment)
     equipment_text = "Counts: " + ", ".join(f"{c}: {n}" for c, n in counts.most_common()) + "\n" + \
         "\n".join(f"{tag} | {cat} | {name} | pages {pages}" for tag, cat, name, pages in equipment)
+    if unread:
+        equipment_text += (
+            f"\nNote: binder pages {unread.replace(',', ', ')} could not be machine-read for this list "
+            "(scanned, or text drawn as lines). Equipment shown only on those pages may be missing, "
+            "so say this whenever you give a count or a complete list.")
     documents_text = "\n\n".join(
         # an LLM summary is sent whole; a page without one sends the passage that matched
         f"[{_source_label(source, file, page)}]\n{summary[:MAX_CONTEXT_DOC] if summary else passage}"
         for _, source, file, page, summary, passage in docs) or "(no matching pages)"
 
+    history_text = "\n".join(
+        f"{'User' if role == 'user' else 'Agent'}: {text[:MAX_HISTORY_TEXT]}"
+        for role, text in history) or "(none)"
+
     prompt = ANSWER_PROMPT.format(equipment=equipment_text, documents=documents_text,
-                                  question=question)
-    text, provider = llm.ask(prompt)
+                                  history=history_text, question=question)
+    text, provider = llm.ask(prompt, retry_waits=ANSWER_RETRY_WAITS)
     sources = [{"source": source, "file": file, "page": page}
                for _, source, file, page, _, _ in docs]
     return {"answer": text, "provider": provider, "sources": sources}
