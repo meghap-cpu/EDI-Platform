@@ -1,7 +1,12 @@
 // Small wrapper around the backend API. Throws an Error with the server's message on failure.
 
 async function request(path, options = {}) {
-  const response = await fetch(`/api${path}`, options);
+  let response;
+  try {
+    response = await fetch(`/api${path}`, options);
+  } catch {
+    throw new Error("Can't reach the EDI server. Check that the backend is running, then try again.");
+  }
   if (!response.ok) {
     let message = `Request failed (${response.status}).`;
     try {

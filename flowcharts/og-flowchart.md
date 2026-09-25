@@ -1,3 +1,5 @@
+
+```mermaid
 flowchart TD
     %% ---------- Start ----------
     U["User uploads the binder<br/>and the rulebooks"]
@@ -90,3 +92,4 @@ flowchart TD
     class IN,PG,RB,T0,T1,T2,T3,T4,T5 store
     class S6,T6 optional
     class F bad
+```

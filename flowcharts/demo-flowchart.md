@@ -1,3 +1,5 @@
+
+```mermaid
 flowchart TD
     subgraph SETUP["Step 1: Setup"]
         A["User uploads the binder<br/>(P&ID drawings)<br/>and the rulebooks<br/>(legends, symbols, codes)"] --> B["System creates a new<br/>'agent' for this binder"]
@@ -27,3 +29,4 @@ flowchart TD
         M -->|"No, within seconds"| X["User sees:<br/>'Please try again in a minute'"]
         N --> O["User can click a reference<br/>to view the original drawing"]
     end
+```

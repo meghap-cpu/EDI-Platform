@@ -1,7 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { askAgent, createAgent, getAgent, listAgents, pageImageUrl, resumeAgent } from "./api.js";
 
-const HISTORY_MESSAGES = 6; // earlier messages sent with each question, so follow-ups make sense
+const HISTORY_MESSAGES = 4; // earlier messages sent with each question, so follow-ups make sense
+const CHAT_STORAGE_PREFIX = "edi-chat:"; // chats are kept in this browser, one per agent
+const MAX_SAVED_MESSAGES = 50;
+const SLOW_ANSWER_SECONDS = 15; // after this long, explain that the local AI can be slow
+// A page citation as the backend writes and checks it: "binder p. 12" or "rulebook <file> p. 1".
+const CITATION_RE = /\bbinder\s+p\.\s*(\d+)|\brulebook\s+([\w.-]+?)(?:\.pdf)?\s+p\.\s*(\d+)/gi;
 
 const EXAMPLE_QUESTIONS = [
   "How many pumps are there?",
@@ -53,14 +58,27 @@ export default function App() {
     setReloadKey((k) => k + 1);
   };
 
+  // Load a chat from this browser the first time its agent is opened, and save it on every change.
+  useEffect(() => {
+    if (selectedId && !(selectedId in messages)) {
+      setMessages((all) => ({ ...all, [selectedId]: loadChat(selectedId) }));
+    }
+  }, [selectedId]);
+  useEffect(() => {
+    if (selectedId && messages[selectedId]) saveChat(selectedId, messages[selectedId]);
+  }, [selectedId, messages]);
+
   const addMessage = (message) =>
     setMessages((all) => ({ ...all, [selectedId]: [...(all[selectedId] || []), message] }));
+  const clearChat = () => setMessages((all) => ({ ...all, [selectedId]: [] }));
 
   return (
     <div className="layout">
       <aside className="setup">
-        <h1 className="brand">Binder agent</h1>
-        <p className="lede">Upload a P&amp;ID binder and its rulebooks, then ask anything about them.</p>
+        <h1 className="brand">EDI Platform</h1>
+        <p className="lede">
+          Engineering Document Intelligence. Upload a P&amp;ID binder and its rulebooks, then ask anything about them.
+        </p>
         <UploadPanel onCreated={onCreated} />
         <AgentList agents={agents} selectedId={selectedId} onSelect={setSelectedId} />
       </aside>
@@ -74,6 +92,7 @@ export default function App() {
               ready={info.status === "ready"}
               messages={messages[selectedId] || []}
               addMessage={addMessage}
+              onNewChat={clearChat}
               onViewSource={setViewing}
             />
           </>
@@ -175,6 +194,8 @@ function TitleBlock({ info, onResume }) {
   const done = Number(info.done || 0);
   const total = Number(info.total || 0);
   const stalled = info.status === "processing" && !info.running;
+  const timeLeft = useTimeLeft(info);
+  const plainSheets = total - Number(info.summarised);
   const statusText = {
     created: "Starting",
     processing: stalled ? "Paused" : total ? `Reading sheet ${Math.min(done + 1, total)} of ${total}` : "Starting",
@@ -206,6 +227,9 @@ function TitleBlock({ info, onResume }) {
         ) : (
           <span className="tb-value">{statusText}</span>
         )}
+        {info.status === "processing" && info.running && (
+          <span className="tb-eta">{timeLeft === null ? "Estimating time left…" : formatTimeLeft(timeLeft)}</span>
+        )}
         {total > 0 && info.status !== "ready" && (
           <progress max={total} value={done} aria-label="Sheets read" />
         )}
@@ -216,17 +240,39 @@ function TitleBlock({ info, onResume }) {
           <button onClick={onResume}>Continue reading</button>
         </div>
       )}
-      {info.status === "ready" && Number(info.summarised) < total && (
+      {info.status === "ready" && plainSheets > 0 && (
         <div className="tb-cell tb-wide tb-note">
-          {total - Number(info.summarised)} sheets were stored as plain text because no AI provider answered.
-          They can still be searched.
+          {plainSheets === 1
+            ? "1 sheet couldn't be summarised by the AI, so it's searched by its text only."
+            : `${plainSheets} sheets couldn't be summarised by the AI, so they're searched by their text only.`}
         </div>
       )}
     </section>
   );
 }
 
-function Chat({ agentId, ready, messages, addMessage, onViewSource }) {
+// Estimates the time left from the reading pace seen since this agent was opened.
+function useTimeLeft(info) {
+  const start = useRef(null); // { id, done, time } when reading was first seen
+  const done = Number(info.done || 0);
+  const total = Number(info.total || 0);
+  if (info.status !== "processing" || !info.running) {
+    start.current = null;
+    return null;
+  }
+  if (!start.current || start.current.id !== info.id) start.current = { id: info.id, done, time: Date.now() };
+  const sheetsRead = done - start.current.done;
+  if (sheetsRead < 1) return null;
+  return ((Date.now() - start.current.time) / sheetsRead) * (total - done);
+}
+
+function formatTimeLeft(ms) {
+  const minutes = Math.round(ms / 60000);
+  if (minutes < 1) return "Less than a minute left";
+  return minutes === 1 ? "About 1 minute left" : `About ${minutes} minutes left`;
+}
+
+function Chat({ agentId, ready, messages, addMessage, onNewChat, onViewSource }) {
   const [question, setQuestion] = useState("");
   const [busy, setBusy] = useState(false);
   const endRef = useRef(null);
@@ -245,9 +291,11 @@ function Chat({ agentId, ready, messages, addMessage, onViewSource }) {
     setBusy(true);
     try {
       const reply = await askAgent(agentId, q, history);
-      addMessage({ role: "agent", text: reply.answer, provider: reply.provider, sources: reply.sources });
+      addMessage({
+        role: "agent", text: reply.answer, provider: reply.provider, sources: reply.sources, cited: reply.cited,
+      });
     } catch (e) {
-      addMessage({ role: "agent", error: true, text: e.message });
+      addMessage({ role: "agent", error: true, text: e.message, question: q });
     } finally {
       setBusy(false);
     }
@@ -255,6 +303,12 @@ function Chat({ agentId, ready, messages, addMessage, onViewSource }) {
 
   return (
     <section className="chat">
+      {messages.length > 0 && (
+        <div className="chat-bar">
+          <span>Follow-up questions build on this conversation.</span>
+          <button type="button" onClick={onNewChat} disabled={busy}>New chat</button>
+        </div>
+      )}
       <div className="messages">
         {!messages.length && (
           <div className="starter">
@@ -268,16 +322,21 @@ function Chat({ agentId, ready, messages, addMessage, onViewSource }) {
                 </div>
               </>
             ) : (
-              <p>The agent is reading the binder. You can ask questions once it shows Ready.</p>
+              <p>The binder is still being read. You can ask questions once it shows Ready.</p>
             )}
           </div>
         )}
         {messages.map((m, i) => (
           <article key={i} className={`message ${m.role}${m.error ? " failed" : ""}`}>
-            <FormattedText text={m.text} />
+            <FormattedText text={m.text} sources={m.sources || []} agentId={agentId} onViewSource={onViewSource} />
+            {m.error && m.question && i === messages.length - 1 && (
+              <button type="button" className="retry" onClick={() => ask(m.question)} disabled={busy || !ready}>
+                Try again
+              </button>
+            )}
             {m.sources?.length > 0 && (
               <div className="sources">
-                <span>Checked:</span>
+                <span>{m.cited ? "Sources:" : "Pages searched:"}</span>
                 {m.sources.map((s) => (
                   <button key={`${s.source}-${s.file}-${s.page}`} onClick={() => onViewSource(s)}>
                     {s.source === "binder" ? `Binder p. ${s.page}` : `${s.file.replace(/\.pdf$/i, "")} p. ${s.page}`}
@@ -285,10 +344,14 @@ function Chat({ agentId, ready, messages, addMessage, onViewSource }) {
                 ))}
               </div>
             )}
-            {m.provider && <span className="provider">Answered by {m.provider}</span>}
+            {m.provider && (
+              <span className="provider">
+                {m.provider === "Ollama" ? "Answered by the local AI (Ollama)" : `Answered by ${m.provider} (cloud AI)`}
+              </span>
+            )}
           </article>
         ))}
-        {busy && <p className="thinking">Looking through the binder…</p>}
+        {busy && <Waiting />}
         <div ref={endRef} />
       </div>
       <form
@@ -303,7 +366,7 @@ function Chat({ agentId, ready, messages, addMessage, onViewSource }) {
           id="question"
           value={question}
           onChange={(e) => setQuestion(e.target.value)}
-          placeholder={ready ? "Ask about this binder" : "Available when the agent is ready"}
+          placeholder={ready ? "Ask about this binder" : "Available once the binder is read"}
           disabled={!ready}
           autoComplete="off"
         />
@@ -313,14 +376,40 @@ function Chat({ agentId, ready, messages, addMessage, onViewSource }) {
   );
 }
 
+// Shows the time spent on the current question, so a slow answer doesn't look like a frozen app.
+function Waiting() {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    const started = Date.now();
+    const timer = setInterval(() => setSeconds(Math.round((Date.now() - started) / 1000)), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  return (
+    <div className="thinking" role="status">
+      <span>
+        Reading the drawings… <span aria-hidden="true">{seconds} s</span>
+      </span>
+      {seconds >= SLOW_ANSWER_SECONDS && (
+        <span className="thinking-hint">Answers usually take under 30 seconds, occasionally up to 2½ minutes.</span>
+      )}
+    </div>
+  );
+}
+
 // Shows line breaks and **bold** from the model's reply without rendering raw HTML.
-function FormattedText({ text }) {
+// Page citations that match the answer's sources become links to the page.
+function FormattedText({ text, sources, agentId, onViewSource }) {
+  const cite = (part) => withCitations(part, sources, agentId, onViewSource);
   return (
     <div className="text">
-      {text.split("\n").map((line, i) => (
+      {text.split("\n").map(plainLine).map((line, i) => (
         <p key={i}>
           {line.split(/(\*\*[^*]+\*\*)/g).map((part, j) =>
-            part.startsWith("**") && part.endsWith("**") ? <strong key={j}>{part.slice(2, -2)}</strong> : part
+            part.startsWith("**") && part.endsWith("**") ? (
+              <strong key={j}>{cite(part.slice(2, -2))}</strong>
+            ) : (
+              <Fragment key={j}>{cite(part)}</Fragment>
+            )
           )}
         </p>
       ))}
@@ -328,7 +417,65 @@ function FormattedText({ text }) {
   );
 }
 
+function withCitations(text, sources, agentId, onViewSource) {
+  const parts = [];
+  let last = 0;
+  for (const match of text.matchAll(CITATION_RE)) {
+    const source = findCitedSource(match, sources);
+    if (!source) continue;
+    parts.push(text.slice(last, match.index));
+    // A link (not a button) so a long citation wraps with the sentence.
+    parts.push(
+      <a
+        key={match.index}
+        className="cite"
+        href={pageImageUrl(agentId, source)}
+        onClick={(e) => {
+          e.preventDefault();
+          onViewSource(source);
+        }}
+      >
+        {match[0]}
+      </a>
+    );
+    last = match.index + match[0].length;
+  }
+  parts.push(text.slice(last));
+  return parts;
+}
+
+function findCitedSource([, binderPage, rulebook, rulebookPage], sources) {
+  return sources.find((s) =>
+    binderPage
+      ? s.source === "binder" && s.page === Number(binderPage)
+      : s.source === "rulebook" && s.page === Number(rulebookPage) &&
+        s.file.replace(/\.pdf$/i, "").toLowerCase() === rulebook.toLowerCase()
+  );
+}
+
+function loadChat(agentId) {
+  try {
+    return JSON.parse(localStorage.getItem(CHAT_STORAGE_PREFIX + agentId)) || [];
+  } catch {
+    return [];
+  }
+}
+
+function saveChat(agentId, messages) {
+  try {
+    localStorage.setItem(CHAT_STORAGE_PREFIX + agentId, JSON.stringify(messages.slice(-MAX_SAVED_MESSAGES)));
+  } catch {
+    // storage full or blocked: the chat still works, it just isn't kept after a refresh
+  }
+}
+
+// The prompt asks for plain text, but a model may still write "### Heading" or "* item".
+function plainLine(line) {
+  return line.replace(/^#+\s+/, "").replace(/^(\s*)\*\s+/, "$1- ");
+}
+
 function PageViewer({ agentId, source, onClose }) {
+  const [fullSize, setFullSize] = useState(false); // false: fit the page to the window
   useEffect(() => {
     const onKey = (e) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
@@ -341,10 +488,20 @@ function PageViewer({ agentId, source, onClose }) {
       <div className="viewer-frame" onClick={(e) => e.stopPropagation()}>
         <header>
           <span>{title}</span>
-          <button onClick={onClose} autoFocus>Close</button>
+          <span className="viewer-actions">
+            <button onClick={() => setFullSize((f) => !f)} aria-pressed={fullSize}>
+              {fullSize ? "Fit to window" : "Full size"}
+            </button>
+            <button onClick={onClose} autoFocus>Close</button>
+          </span>
         </header>
         <div className="viewer-body">
-          <img src={pageImageUrl(agentId, source)} alt={title} />
+          <img
+            src={pageImageUrl(agentId, source)}
+            alt={title}
+            className={fullSize ? "full-size" : ""}
+            onClick={() => setFullSize((f) => !f)}
+          />
         </div>
       </div>
     </div>
