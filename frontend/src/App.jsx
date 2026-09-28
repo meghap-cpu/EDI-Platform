@@ -107,6 +107,7 @@ function Home() {
     await resumeAgent(id);
     reload();
   };
+  const readyAgents = agents?.filter((agent) => agent.status === "ready") || [];
 
   return (
     <div className="app">
@@ -119,24 +120,47 @@ function Home() {
         {loadError && <p className="error" role="alert">{loadError}</p>}
         <div className="home-grid">
           <aside className="home-sidebar">
-            <NewBinderTile onCreated={reload} />
-            <div className="binder-progress-list">
-              {agents?.filter((agent) => agent.status !== "ready").map((agent) => (
-                <ReadingTile key={agent.id} agent={agent} onResume={() => onResume(agent.id)} />
-              ))}
-            </div>
+            <section className="home-section" aria-labelledby="upload-title">
+              <div className="section-heading">
+                <span className="section-kicker">01</span>
+                <h2 id="upload-title">Upload documents</h2>
+              </div>
+              <NewBinderTile onCreated={reload} />
+            </section>
+            <section className="home-section" aria-labelledby="progress-title">
+              <div className="section-heading">
+                <span className="section-kicker">02</span>
+                <h2 id="progress-title">Reading progress</h2>
+              </div>
+              <div className="binder-progress-list">
+                {agents?.filter((agent) => agent.status !== "ready").map((agent) => (
+                  <ReadingTile key={agent.id} agent={agent} onResume={() => onResume(agent.id)} />
+                ))}
+                {agents && !agents.some((agent) => agent.status !== "ready") && (
+                  <PlaceholderTile title="No active readings" text="Progress will appear here after you upload a binder." />
+                )}
+              </div>
+            </section>
           </aside>
-          <div className="binder-list">
-            {agents?.length === 0 && (
-              <section className="tile empty-tile">
-                <h2>No binders yet</h2>
-                <p className="muted">Add a binder PDF on the left to get started.</p>
-              </section>
-            )}
-            {agents?.filter((agent) => agent.status === "ready").map((agent) => (
-              <OverviewTile key={agent.id} agent={agent} />
-            ))}
-          </div>
+          <section className="home-section agents-section" aria-labelledby="agents-title">
+            <div className="section-heading">
+              <span className="section-kicker">03</span>
+              <h2 id="agents-title">Created agents</h2>
+            </div>
+            <div className="binder-list">
+              {readyAgents.map((agent) => (
+                <OverviewTile key={agent.id} agent={agent} />
+              ))}
+              {agents && (
+                <>
+                  <PlaceholderTile />
+                  <PlaceholderTile />
+                  <PlaceholderTile />
+                  {/* <PlaceholderTile /> */}
+                </>
+              )}
+            </div>
+          </section>
         </div>
       </main>
       <Footer />
@@ -307,6 +331,15 @@ function ReadingTile({ agent, onResume }) {
       ) : (
         <p className="muted small">You can ask questions once it shows Ready. Finished sheets are kept if reading stops.</p>
       )}
+    </section>
+  );
+}
+
+function PlaceholderTile({ title = "Future agent slot", text = "" }) {
+  return (
+    <section className="placeholder-tile" aria-label={title}>
+      <span className="placeholder-icon" aria-hidden="true">+</span>
+      {text && <><h3>{title}</h3><p>{text}</p></>}
     </section>
   );
 }
